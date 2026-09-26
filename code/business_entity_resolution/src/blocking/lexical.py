@@ -33,23 +33,58 @@ _CHUNK_SIZE = 2_000
 _FILTER_THRESHOLD = 5_000
 
 
+# ponytail: a bucket can still be much bigger than the 100k-row sample this
+# module was benchmarked against (a common prefix like "the"/"inc" at full
+# 1.3M-row country scale) -- densifying a whole bucket in one matmul
+# measured a real CUDA OOM ("tried to allocate 3.12 GiB, 2.00 GiB free") on
+# a T4. Tile both sides instead: bounded (s1_batch x cand_batch) matmuls,
+# keep each candidate-batch's local top-k, then merge -- exact top-k, not
+# approximate, since the true top-k is always among the union of every
+# batch's local top-k.
+_GPU_S1_BATCH = 256
+_GPU_CAND_BATCH = 4096
+
+
 def _topk_gpu(s1_matrix: sparse.csr_matrix, cand_matrix_t: sparse.csr_matrix, top_k: int) -> list[list[tuple[int, float]]]:
-    """Dense matmul on CUDA -- each bucket's TF-IDF vocab is already
-    bucket-local (small), so densifying is cheap and a T4 does the matmul
-    in microseconds versus scipy sparse's CPU cost at this row count."""
+    """Dense matmul on CUDA, tiled to bound peak GPU memory regardless of
+    bucket size."""
     device = torch.device("cuda")
-    s1_dense = torch.from_numpy(s1_matrix.toarray()).to(device)
-    cand_dense = torch.from_numpy(cand_matrix_t.toarray()).to(device)
-    sims = s1_dense @ cand_dense  # (n_s1, n_cand), cosine since both L2-normalized
-    k = min(top_k, sims.shape[1])
-    if k == 0:
-        return [[] for _ in range(sims.shape[0])]
-    vals, idx = torch.topk(sims, k=k, dim=1)
-    vals_np, idx_np = vals.cpu().numpy(), idx.cpu().numpy()
-    return [
-        [(int(c), float(v)) for c, v in zip(row_idx, row_vals) if v > 0]
-        for row_idx, row_vals in zip(idx_np, vals_np)
-    ]
+    n_s1, n_cand = s1_matrix.shape[0], cand_matrix_t.shape[1]
+    out: list[list[tuple[int, float]]] = []
+
+    for s1_start in range(0, n_s1, _GPU_S1_BATCH):
+        s1_chunk = torch.from_numpy(s1_matrix[s1_start:s1_start + _GPU_S1_BATCH].toarray()).to(device)
+        batch_vals: list[torch.Tensor] = []
+        batch_idx: list[torch.Tensor] = []
+
+        for cand_start in range(0, n_cand, _GPU_CAND_BATCH):
+            cand_chunk = torch.from_numpy(
+                cand_matrix_t[:, cand_start:cand_start + _GPU_CAND_BATCH].toarray()
+            ).to(device)
+            sims = s1_chunk @ cand_chunk  # (s1_batch, cand_batch), cosine since both L2-normalized
+            k = min(top_k, sims.shape[1])
+            if k == 0:
+                continue
+            vals, idx = torch.topk(sims, k=k, dim=1)
+            batch_vals.append(vals)
+            batch_idx.append(idx + cand_start)
+
+        if not batch_vals:
+            out.extend([] for _ in range(s1_chunk.shape[0]))
+            continue
+
+        all_vals = torch.cat(batch_vals, dim=1)
+        all_idx = torch.cat(batch_idx, dim=1)
+        k_final = min(top_k, all_vals.shape[1])
+        final_vals, final_pos = torch.topk(all_vals, k=k_final, dim=1)
+        final_idx = torch.gather(all_idx, 1, final_pos)
+
+        vals_np, idx_np = final_vals.cpu().numpy(), final_idx.cpu().numpy()
+        out.extend(
+            [(int(c), float(v)) for c, v in zip(row_idx, row_vals) if v > 0]
+            for row_idx, row_vals in zip(idx_np, vals_np)
+        )
+    return out
 
 
 def _tfidf_topk(s1_names: list[str], cand_names: list[str], top_k: int) -> list[list[tuple[int, float]]]:
