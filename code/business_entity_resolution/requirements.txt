@@ -1,3 +1,12 @@
 polars==1.44.2
 rapidfuzz==3.14.6
 pytest==9.0.3
+scikit-learn==1.8.0
+scipy==1.17.1
+lightgbm==4.7.0
+
+# torch is optional -- only used by src/blocking/lexical.py's GPU-accelerated
+# TF-IDF matmul path when a CUDA device is present (e.g. Google Colab's T4).
+# Not pinned here on purpose: Colab ships its own CUDA-matched build: pinning
+# a CPU-only version here would fight that. The CPU path (scipy sparse) is
+# what runs -- and is fully reproducible -- when torch is absent or CPU-only.
