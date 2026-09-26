@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Challenge-provided raw dataset (multi-hundred-MB TSVs, several over GitHub's
+# 100MB single-file limit) -- not part of the deliverable per PRD §2's ZIP
+# structure (only code/ + output/ + Documentation_template.md ship). Place the
+# real files at student_resource/dataset/{train,test}/*.tsv locally; the small
+# official challenge files (README, template, validator) stay tracked.
+student_resource/dataset/**/*.tsv
+student_resource/**/.DS_Store
+
+# macOS zip-extraction artifacts, no content of their own.
+__MACOSX/
