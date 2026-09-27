@@ -5,6 +5,7 @@ cross-country buffer, no fallback blocker: those are Phase 4/5).
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import polars as pl
 from scipy import sparse
@@ -175,20 +176,49 @@ def _bucketed_tfidf_topk(
     return result
 
 
-def generate_candidates(s1: pl.DataFrame, s2: pl.DataFrame, s3: pl.DataFrame, top_k: int = 20) -> pl.DataFrame:
+def _empty_candidate_frame() -> pl.DataFrame:
+    return pl.DataFrame(schema={
+        "source1_entity_id": pl.Utf8, "candidate_id": pl.Utf8, "country": pl.Utf8,
+        "blocking_rank": pl.Int64, "tfidf_score": pl.Float64, "exact_match": pl.Boolean,
+    })
+
+
+def generate_candidates(
+    s1: pl.DataFrame,
+    s2: pl.DataFrame,
+    s3: pl.DataFrame,
+    top_k: int = 20,
+    checkpoint_dir: Path | None = None,
+    checkpoint_label: str = "candidates",
+) -> pl.DataFrame:
+    """Blocking is the multi-hour stage at full dataset scale, and it's
+    naturally split into independent per-country partitions -- so when
+    ``checkpoint_dir`` is given, each finished country's result is written
+    to ``<checkpoint_dir>/<checkpoint_label>_<country>.parquet`` and
+    reloaded (skipping recomputation) on a rerun that finds it already
+    there. A crash mid-run costs at most the one in-flight country, not
+    every country finished before it. No hashing/invalidation of stale
+    checkpoints against changed inputs -- delete the directory for a
+    genuinely fresh run (Phase 0 MVP scope, not a general cache)."""
     s2 = s2.with_columns(source=pl.lit("S2"))
     s3 = s3.with_columns(source=pl.lit("S3"))
     candidates = pl.concat([s2, s3], how="vertical")
 
-    rows: list[dict] = []
+    country_frames: list[pl.DataFrame] = []
     for country in s1["country"].unique().to_list():
         s1_country = s1.filter(pl.col("country") == country)
         cand_country = candidates.filter(pl.col("country") == country)
         if s1_country.height == 0 or cand_country.height == 0:
             continue
 
+        ckpt_path = checkpoint_dir / f"{checkpoint_label}_{country}.parquet" if checkpoint_dir else None
+        if ckpt_path is not None and ckpt_path.exists():
+            print(f"[blocking] {country}: loaded from checkpoint {ckpt_path}", flush=True)
+            country_frames.append(pl.read_parquet(ckpt_path))
+            continue
+
         t0 = time.time()
-        rows_before = len(rows)
+        rows: list[dict] = []
         print(
             f"[blocking] {country}: {s1_country.height} S1 rows x {cand_country.height} candidates...",
             flush=True,
@@ -230,14 +260,16 @@ def generate_candidates(s1: pl.DataFrame, s2: pl.DataFrame, s3: pl.DataFrame, to
                 seen.add(cand_id)
                 rank += 1
 
+        country_df = pl.DataFrame(rows).select(_CANDIDATE_SCHEMA) if rows else _empty_candidate_frame()
         print(
-            f"[blocking] {country}: done in {time.time() - t0:.1f}s, {len(rows) - rows_before} candidate rows",
+            f"[blocking] {country}: done in {time.time() - t0:.1f}s, {country_df.height} candidate rows",
             flush=True,
         )
+        if ckpt_path is not None:
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            country_df.write_parquet(ckpt_path)
+        country_frames.append(country_df)
 
-    if not rows:
-        return pl.DataFrame(schema={
-            "source1_entity_id": pl.Utf8, "candidate_id": pl.Utf8, "country": pl.Utf8,
-            "blocking_rank": pl.Int64, "tfidf_score": pl.Float64, "exact_match": pl.Boolean,
-        })
-    return pl.DataFrame(rows).select(_CANDIDATE_SCHEMA)
+    if not country_frames:
+        return _empty_candidate_frame()
+    return pl.concat(country_frames)

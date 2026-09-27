@@ -12,5 +12,16 @@ __pycache__/
 student_resource/dataset/**/*.tsv
 student_resource/**/.DS_Store
 
+# Ad-hoc dataset transfer archives (e.g. zipping student_resource/ to move it
+# to Colab/another machine) -- same reason as the TSVs above, just zipped.
+*.zip
+
+# Pipeline resume state (run_pipeline.py's checkpoint_dir defaults to
+# <output_dir>/checkpoints) -- large intermediate parquet files, not a
+# deliverable; safe to delete any time to force a fresh run.
+# output/matching_results.tsv and candidate_pairs.tsv (the actual
+# deliverables) are NOT excluded here.
+output/checkpoints/
+
 # macOS zip-extraction artifacts, no content of their own.
 __MACOSX/

@@ -49,23 +49,46 @@ def _stage_done(stage: tuple[str, float]) -> None:
     print(f"[pipeline] {label} done in {time.time() - t0:.1f}s", flush=True)
 
 
-def run(data_dir: Path, output_dir: Path, repo_root: Path) -> int:
+def _load_or_build(ckpt_path: Path, label: str, build) -> pl.DataFrame:
+    """Whole-stage checkpoint -- coarser than blocking's per-country resume,
+    but feature-building is a single call over the whole candidate frame
+    (not naturally per-country), and cheap enough relative to blocking that
+    one retry on a crash is tolerable. Skipped entirely when ckpt_path is
+    None (no checkpoint_dir given)."""
+    if ckpt_path is not None and ckpt_path.exists():
+        print(f"[pipeline] {label}: loaded from checkpoint {ckpt_path}", flush=True)
+        return pl.read_parquet(ckpt_path)
+    stage = _stage_start(label)
+    result = build()
+    _stage_done(stage)
+    if ckpt_path is not None:
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        result.write_parquet(ckpt_path)
+    return result
+
+
+def run(data_dir: Path, output_dir: Path, repo_root: Path, checkpoint_dir: Path | None = None) -> int:
     random.seed(SEED)
     np.random.seed(SEED)
+    if checkpoint_dir is not None:
+        print(f"[pipeline] checkpointing to {checkpoint_dir} -- rerun with the same output_dir to resume", flush=True)
 
     stage = _stage_start("loading dataset")
     ds: BERDataset = load_all(data_dir)
     _stage_done(stage)
 
-    stage = _stage_start("blocking training candidates")
-    train_candidates = generate_candidates(ds.train_source1, ds.train_source2, ds.train_source3, top_k=20)
+    train_candidates = generate_candidates(
+        ds.train_source1, ds.train_source2, ds.train_source3, top_k=20,
+        checkpoint_dir=checkpoint_dir, checkpoint_label="train_blocking",
+    )
     train_candidates = _label_training_pairs(train_candidates, ds.train_ground_truth)
     print(f"[pipeline] train candidate rows: {train_candidates.height}", flush=True)
-    _stage_done(stage)
 
-    stage = _stage_start("building training features")
-    train_features = build_features(train_candidates, ds.train_source1, ds.train_source2, ds.train_source3)
-    _stage_done(stage)
+    train_features = _load_or_build(
+        checkpoint_dir / "train_features.parquet" if checkpoint_dir else None,
+        "building training features",
+        lambda: build_features(train_candidates, ds.train_source1, ds.train_source2, ds.train_source3),
+    )
 
     print("[pipeline] naive random row split (PRD §19 Phase 0 -- GroupKFold is Phase 2)...", flush=True)
     train_df, val_df = train_test_split(
@@ -90,14 +113,17 @@ def run(data_dir: Path, output_dir: Path, repo_root: Path) -> int:
     metrics = evaluate(resolve_1to1(val_df, val_probs, best_threshold), val_truth)
     print(f"[pipeline] full val metrics: {metrics}", flush=True)
 
-    stage = _stage_start("blocking test candidates")
-    test_candidates = generate_candidates(ds.test_source1, ds.test_source2, ds.test_source3, top_k=20)
+    test_candidates = generate_candidates(
+        ds.test_source1, ds.test_source2, ds.test_source3, top_k=20,
+        checkpoint_dir=checkpoint_dir, checkpoint_label="test_blocking",
+    )
     print(f"[pipeline] test candidate rows: {test_candidates.height}", flush=True)
-    _stage_done(stage)
 
-    stage = _stage_start("building test features")
-    test_features = build_features(test_candidates, ds.test_source1, ds.test_source2, ds.test_source3)
-    _stage_done(stage)
+    test_features = _load_or_build(
+        checkpoint_dir / "test_features.parquet" if checkpoint_dir else None,
+        "building test features",
+        lambda: build_features(test_candidates, ds.test_source1, ds.test_source2, ds.test_source3),
+    )
 
     test_probs = predict_proba(model, test_features)
     test_matches = resolve_1to1(test_features, test_probs, best_threshold)
@@ -133,7 +159,8 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_data_dir()
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else repo_root / "output"
-    sys.exit(run(data_dir, output_dir, repo_root))
+    checkpoint_dir = output_dir / "checkpoints"
+    sys.exit(run(data_dir, output_dir, repo_root, checkpoint_dir))
 
 
 if __name__ == "__main__":
