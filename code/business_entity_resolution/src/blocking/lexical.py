@@ -4,6 +4,8 @@ cross-country buffer, no fallback blocker: those are Phase 4/5).
 """
 from __future__ import annotations
 
+import time
+
 import polars as pl
 from scipy import sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -185,6 +187,13 @@ def generate_candidates(s1: pl.DataFrame, s2: pl.DataFrame, s3: pl.DataFrame, to
         if s1_country.height == 0 or cand_country.height == 0:
             continue
 
+        t0 = time.time()
+        rows_before = len(rows)
+        print(
+            f"[blocking] {country}: {s1_country.height} S1 rows x {cand_country.height} candidates...",
+            flush=True,
+        )
+
         s1_ids = s1_country["entity_id"].to_list()
         s1_names_norm = [normalize_text(n) for n in s1_country["business_name"].to_list()]
         cand_ids = cand_country["entity_id"].to_list()
@@ -220,6 +229,11 @@ def generate_candidates(s1: pl.DataFrame, s2: pl.DataFrame, s3: pl.DataFrame, to
                 })
                 seen.add(cand_id)
                 rank += 1
+
+        print(
+            f"[blocking] {country}: done in {time.time() - t0:.1f}s, {len(rows) - rows_before} candidate rows",
+            flush=True,
+        )
 
     if not rows:
         return pl.DataFrame(schema={

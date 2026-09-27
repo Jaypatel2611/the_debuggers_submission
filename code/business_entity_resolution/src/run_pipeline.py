@@ -7,6 +7,7 @@ from __future__ import annotations
 import random
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -38,19 +39,33 @@ def _label_training_pairs(candidates: pl.DataFrame, ground_truth: pl.DataFrame) 
     return candidates.with_columns(label=pl.Series(is_positive))
 
 
+def _stage_start(label: str) -> tuple[str, float]:
+    print(f"[pipeline] {label}...", flush=True)
+    return label, time.time()
+
+
+def _stage_done(stage: tuple[str, float]) -> None:
+    label, t0 = stage
+    print(f"[pipeline] {label} done in {time.time() - t0:.1f}s", flush=True)
+
+
 def run(data_dir: Path, output_dir: Path, repo_root: Path) -> int:
     random.seed(SEED)
     np.random.seed(SEED)
 
+    stage = _stage_start("loading dataset")
     ds: BERDataset = load_all(data_dir)
+    _stage_done(stage)
 
-    print("[pipeline] blocking training candidates...", flush=True)
+    stage = _stage_start("blocking training candidates")
     train_candidates = generate_candidates(ds.train_source1, ds.train_source2, ds.train_source3, top_k=20)
     train_candidates = _label_training_pairs(train_candidates, ds.train_ground_truth)
     print(f"[pipeline] train candidate rows: {train_candidates.height}", flush=True)
+    _stage_done(stage)
 
-    print("[pipeline] building training features...", flush=True)
+    stage = _stage_start("building training features")
     train_features = build_features(train_candidates, ds.train_source1, ds.train_source2, ds.train_source3)
+    _stage_done(stage)
 
     print("[pipeline] naive random row split (PRD §19 Phase 0 -- GroupKFold is Phase 2)...", flush=True)
     train_df, val_df = train_test_split(
@@ -75,10 +90,15 @@ def run(data_dir: Path, output_dir: Path, repo_root: Path) -> int:
     metrics = evaluate(resolve_1to1(val_df, val_probs, best_threshold), val_truth)
     print(f"[pipeline] full val metrics: {metrics}", flush=True)
 
-    print("[pipeline] blocking test candidates...", flush=True)
+    stage = _stage_start("blocking test candidates")
     test_candidates = generate_candidates(ds.test_source1, ds.test_source2, ds.test_source3, top_k=20)
     print(f"[pipeline] test candidate rows: {test_candidates.height}", flush=True)
+    _stage_done(stage)
+
+    stage = _stage_start("building test features")
     test_features = build_features(test_candidates, ds.test_source1, ds.test_source2, ds.test_source3)
+    _stage_done(stage)
+
     test_probs = predict_proba(model, test_features)
     test_matches = resolve_1to1(test_features, test_probs, best_threshold)
 
