@@ -176,6 +176,27 @@ def _bucketed_tfidf_topk(
     return result
 
 
+def _read_checkpoint(path: Path) -> pl.DataFrame | None:
+    """None means "treat as not cached" -- covers a torn/corrupt parquet
+    file left behind by a hard crash (power loss) mid-write, not just a
+    missing one."""
+    try:
+        return pl.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001 -- any read failure means recompute, not crash
+        print(f"[blocking] checkpoint {path} unreadable ({exc}) -- recomputing", flush=True)
+        return None
+
+
+def _write_checkpoint_atomic(df: pl.DataFrame, path: Path) -> None:
+    """Write-then-rename so a checkpoint file only ever exists once fully
+    written -- a power loss mid-write leaves the .tmp file, never a
+    half-written file at the final name that a later run would try to load."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    df.write_parquet(tmp_path)
+    tmp_path.replace(path)
+
+
 def _empty_candidate_frame() -> pl.DataFrame:
     return pl.DataFrame(schema={
         "source1_entity_id": pl.Utf8, "candidate_id": pl.Utf8, "country": pl.Utf8,
@@ -213,9 +234,11 @@ def generate_candidates(
 
         ckpt_path = checkpoint_dir / f"{checkpoint_label}_{country}.parquet" if checkpoint_dir else None
         if ckpt_path is not None and ckpt_path.exists():
-            print(f"[blocking] {country}: loaded from checkpoint {ckpt_path}", flush=True)
-            country_frames.append(pl.read_parquet(ckpt_path))
-            continue
+            cached = _read_checkpoint(ckpt_path)
+            if cached is not None:
+                print(f"[blocking] {country}: loaded from checkpoint {ckpt_path}", flush=True)
+                country_frames.append(cached)
+                continue
 
         t0 = time.time()
         rows: list[dict] = []
@@ -266,8 +289,7 @@ def generate_candidates(
             flush=True,
         )
         if ckpt_path is not None:
-            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-            country_df.write_parquet(ckpt_path)
+            _write_checkpoint_atomic(country_df, ckpt_path)
         country_frames.append(country_df)
 
     if not country_frames:

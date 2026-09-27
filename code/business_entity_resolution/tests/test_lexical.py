@@ -82,3 +82,29 @@ def test_checkpoint_label_distinguishes_train_and_test(tmp_path: Path) -> None:
     generate_candidates(s1, s2, s3, top_k=5, checkpoint_dir=tmp_path, checkpoint_label="test")
     assert (tmp_path / "train_US.parquet").exists()
     assert (tmp_path / "test_US.parquet").exists()
+
+
+def test_torn_checkpoint_file_is_recomputed_not_crashed(tmp_path: Path) -> None:
+    # Simulates a power-loss-during-write: a checkpoint file exists at the
+    # expected path but is garbage, not a valid parquet file.
+    s1 = _df([("S1-1", "Acme Corp", "1 Main St", "US")])
+    s2 = _df([("S2-1", "Acme Corp", "1 Main St", "US")])
+    s3 = _df([])
+
+    ckpt_path = tmp_path / "train_US.parquet"
+    ckpt_path.write_bytes(b"not a real parquet file")
+
+    result = generate_candidates(s1, s2, s3, top_k=5, checkpoint_dir=tmp_path, checkpoint_label="train")
+    assert result.filter(pl.col("source1_entity_id") == "S1-1").height == 1
+    # recompute must have overwritten the torn file with a valid one
+    assert pl.read_parquet(ckpt_path).height == result.height
+
+
+def test_checkpoint_write_is_atomic_no_tmp_file_left_behind(tmp_path: Path) -> None:
+    s1 = _df([("S1-1", "Acme Corp", "1 Main St", "US")])
+    s2 = _df([("S2-1", "Acme Corp", "1 Main St", "US")])
+    s3 = _df([])
+
+    generate_candidates(s1, s2, s3, top_k=5, checkpoint_dir=tmp_path, checkpoint_label="train")
+    assert (tmp_path / "train_US.parquet").exists()
+    assert not (tmp_path / "train_US.parquet.tmp").exists()

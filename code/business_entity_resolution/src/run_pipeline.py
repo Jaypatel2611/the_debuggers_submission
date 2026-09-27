@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 from sklearn.model_selection import train_test_split
 
-from .blocking.lexical import generate_candidates
+from .blocking.lexical import _read_checkpoint, _write_checkpoint_atomic, generate_candidates
 from .data.loaders import BERDataset, default_data_dir, load_all
 from .evaluation.metrics import evaluate
 from .features.pairwise import build_features
@@ -56,14 +56,15 @@ def _load_or_build(ckpt_path: Path, label: str, build) -> pl.DataFrame:
     one retry on a crash is tolerable. Skipped entirely when ckpt_path is
     None (no checkpoint_dir given)."""
     if ckpt_path is not None and ckpt_path.exists():
-        print(f"[pipeline] {label}: loaded from checkpoint {ckpt_path}", flush=True)
-        return pl.read_parquet(ckpt_path)
+        cached = _read_checkpoint(ckpt_path)
+        if cached is not None:
+            print(f"[pipeline] {label}: loaded from checkpoint {ckpt_path}", flush=True)
+            return cached
     stage = _stage_start(label)
     result = build()
     _stage_done(stage)
     if ckpt_path is not None:
-        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        result.write_parquet(ckpt_path)
+        _write_checkpoint_atomic(result, ckpt_path)
     return result
 
 
